@@ -1,35 +1,41 @@
-library(readr)
+# library(readr)
 library(data.table)
 library(zoo)
 library(caret)
-library(e1071)
-library(Matrix)
-library(proxy)
-library(qlcMatrix)
-library(cccd)
-library(igraph)
+# library(e1071)
+# library(Matrix)
+# library(proxy)
+# library(qlcMatrix)
+# library(cccd)
+# library(igraph)
 library(gtools)
 library(plyr)
 library(dplyr)
 library(sqldf)
-library(DMwR)
-library(Rtsne)
+# library(DMwR)
+# library(Rtsne)
 library(doParallel)
 library(doRNG)
-library(WGCNA)
+# library(WGCNA)
 library(VGAM)
-library(Boruta)
-setwd("/media/branden/SSHD1/kaggle/bnp")
+library(xgboost)
+# library(Boruta)
+setwd("/Users/branden/h2oDallas/")
 load("./data_trans/cvFoldsList.rda")
-threads <- detectCores() - 2
+threads <- detectCores() - 2 # Used for parallelizing mean encoding feature generation
+row_sampling <- 10000 # Feature engineering requires a lot of memory, so subsample for demonstration purposes -- set to <=0 for no sampling
 ##################
 ## FUNCTIONS
 #################
 source("./data_trans/utils.R")
 
-##################
-## Dmitry's feature interactions
-##################
+
+#########################################################################################################
+#########################################################################################################
+## The following feature interaction lists come from Dmitry, one of my teammates during the compeition
+## I believe he got these from the output from XGBFi which will be discussed later
+#########################################################################################################
+#########################################################################################################
 comb2List <- list(c("v50","v6"),c("v21","v5"),c("v10","v12"),c("v50","v78"),
                   c("v115","v52"),c("v21","v24"),c("v50","v66"),c("v30","v40"),
                   c("v129","v24"),c("v3","v50"),c("v39","v66"),c("v34","v56"),
@@ -216,6 +222,17 @@ comb4List <- list(c("v100","v40","v50","v66"),c("v34","v40","v47","v66"),c("v34"
 t1 <- fread("./train.csv")
 s1 <- fread("./test.csv")
 
+if (row_sampling>0){
+  set.seed(100)
+  train_sample <- data.table(sample=sample(t1$ID, size = row_sampling, replace = FALSE))
+  set.seed(101)
+  test_sample <- data.table(sample=sample(s1$ID, size = row_sampling, replace = FALSE))
+  t1 <- t1[ID %in% train_sample$sample]
+  s1 <- s1[ID %in% test_sample$sample]
+  cvFoldsList <- createFolds(t1$ID, k=5, list=TRUE) # Need to overwrite when sampling
+  save(cvFoldsList, file="./data_trans/cvFoldsList.rda")
+}
+
 # Add target to test set for binding
 s1 <- s1[,target:=-1]
 # Combine into 1 data frame
@@ -224,6 +241,83 @@ ts1 <- data.table(do.call(smartbind,l))
 # Add pred0, dummy, and filter columns for mean encoding interaction features
 ts1 <- cbind(pred0=mean(t1$target), dummy="A", filter=c(rep(0, nrow(t1)), rep(2, nrow(s1))), ts1)
 
+#########################################################################################################
+#########################################################################################################
+## BASELINE GBM -- Getting a baseline score is one of the first things you should do. 
+## This allows us to check if features we engineer are usefull to the model
+## We can also get feature importance from h2o.gbm or xgboost
+#########################################################################################################
+#########################################################################################################
+excludeCols <- c("ID","target","filter","dummy","pred0")
+varCols <- setdiff(colnames(ts1), excludeCols)
+# All numerics are greater than 0 so we can set NAs as 1
+ts1[is.na(ts1)] <- -1
+# Need to convert categoricals to numeric -- will encode them as numeric instead of dummy encoding to save time/memory
+factorCols <- colnames(ts1)[sapply(ts1, is.character)]
+for (col in factorCols){
+  set(ts1, j=col, value=as.numeric(as.factor(ts1[[col]])))
+}
+
+varnames <- setdiff(colnames(ts1), excludeCols)
+dtrain <- xgb.DMatrix(data=data.matrix(ts1[filter==0,varnames,with=F]), label=ts1[filter==0,target])
+
+param <- list(objective="binary:logistic",
+              eval_metric="logloss",
+              eta = .01,
+              max_depth=7,
+              min_child_weight=1,
+              subsample=.8,
+              colsample_bytree=.4,
+              nthread=6
+)
+
+set.seed(201512)
+(tme <- Sys.time())
+xgbBaselineCV <- xgb.cv(data = dtrain,
+                  params = param,
+                  nrounds = 8000,
+                  folds=cvFoldsList,
+                  maximize=FALSE,
+                  prediction=TRUE,
+                  print.every.n = 50,
+                  early.stop.round=200)
+Sys.time() - tme
+save(xgbBaseline, file = "./stack_models/xgbBaselineCV.rda")
+min(xgbBaseline$dt$test.logloss.mean)
+# best logloss -- 0.47658
+
+# Create baseline model for important features and XGBFI
+set.seed(201512)
+(tme <- Sys.time())
+xgbBaseline <- xgb.train(data = dtrain,
+                      params = param,
+                      nrounds = 538) # nrounds from xgbBaseline
+Sys.time() - tme
+xgbImp <- xgb.importance(feature_names = varnames, model = xgbBaseline)
+View(xgbImp)
+
+#########################################################################################################
+#########################################################################################################
+## XGBFI -- https://github.com/Far0n/xgbfi
+## XGBFI is a tool for extracting feature importance and interactions from XGBoost models
+## This can be helpful for feature engineering
+## Requires Mono to run -- http://www.mono-project.com/download/
+#########################################################################################################
+#########################################################################################################
+create_feature_map <- function(fmap_filename, features){
+  for (i in 1:length(features)){
+    cat(paste(c(i-1,features[i],"q"), collapse = "\t"), file=fmap_filename, sep="\n",append=TRUE)
+  }
+}
+
+# Need to create a feature mapping and then dump the XGBoost model
+create_feature_map("./data_trans/xgbBaseline_fmap.txt", varnames)
+xgb.dump(model=xgbBaseline, fname="./data_trans/xgbBaseline_dump", fmap="./data_trans/xgbBaseline_fmap.txt", with.stats = TRUE)
+# After this you will need to run Xgbfi from the command line (see the GitHub Readme)
+# To save time the output is included in 
+
+#########################################################################################################
+#########################################################################################################
 
 # v91 and v107 are the same -- just different labels -- so remove v107
 ts1[,v107:=NULL]
@@ -308,47 +402,11 @@ ts1$v129 <- as.factor(make.names(ts1$v129))
 # ts1 <- predict(pp, ts1)
 
 ts1[is.na(ts1)] <- -1
-ts2 <- copy(ts1)
-
-# ##################
-# ## IMPUTATION
-# ##################
-# library(doParallel)
-# # Using all cores can slow down the computer
-# # significantly, I therefore try to leave one
-# # core alone in order to be able to do something 
-# # else during the time the code runs
-# cores_2_use <- detectCores() - 2
-# 
-# imputeSub <- data.frame(ts1[, -excludeCols, with=FALSE])
-# 
-# cl <- makeCluster(cores_2_use)
-# clusterSetRNGStream(cl, 9956)
-# clusterExport(cl, "imputeSub")
-# clusterEvalQ(cl, library(mice))
-# imp_pars <- 
-#   parLapply(cl = cl, X = 1:cores_2_use, fun = function(no){
-#     mice(imputeSub, m = 1, maxit=1, printFlag = TRUE)
-#   })
-# stopCluster(cl)
-# 
-# imp_merged <- imp_pars[[1]]
-# for (n in 2:length(imp_pars)){
-#   imp_merged <- 
-#     ibind(imp_merged,
-#           imp_pars[[n]])
-# }
-# 
-# save(imp_merged, file="./data_trans/mice_v14.rda")
-# ts1_complete <- cbind(ts1[,excludeCols,with=FALSE], complete(imp_merged))
-# write_csv(ts1_complete, "./data_trans/ts1_mice_v13.csv")
-
-# Bind imputed data with missingness table
-# ts2 <- ts1_complete
+# ts1 <- copy(ts1)
 
 # Get rid of zero variance variables if there are any
-pp <- preProcess(ts2[filter==0, -excludeCols, with=FALSE], method="zv")
-ts2 <- predict(pp, ts2)
+pp <- preProcess(ts1[filter==0, -excludeCols, with=FALSE], method="zv")
+ts1 <- predict(pp, ts1)
 
 
 #####################
@@ -362,21 +420,21 @@ set.seed(119)
 out <- foreach(i=1:length(pairs), .combine='comb', .multicombine=TRUE,
                .init=list(list(), list()), .packages=c("data.table")) %dorng% {
                  name <- paste0(pairs[[i]][1], "_", pairs[[i]][2], "_int2") 
-                 tmp <- ts2[,pairs[[i]][1], with=FALSE] / (ts2[,pairs[[i]][2], with=FALSE] + 1e-05)
-                 if (var(tmp[ts2$filter==0]) != 0) # exclude columns with no variance in the training set
+                 tmp <- ts1[,pairs[[i]][1], with=FALSE] / (ts1[,pairs[[i]][2], with=FALSE] + 1e-05)
+                 if (var(tmp[ts1$filter==0]) != 0) # exclude columns with no variance in the training set
                    list(tmp, name)
                }
 stopCluster(cl)
 pairInts <- as.data.frame(out[[1]])
 colnames(pairInts) <- unlist(out[[2]])
 
-ts2 <- cbind(ts2, pairInts)
+ts1 <- cbind(ts1, pairInts)
 rm(pairInts); gc()
 
 #####################
 ## Factor 2-way counts
 #####################
-factCols <- colnames(ts2[,-excludeCols,with=FALSE])[sapply(ts2[,-excludeCols,with=FALSE], is.factor)]
+factCols <- colnames(ts1[,-excludeCols,with=FALSE])[sapply(ts1[,-excludeCols,with=FALSE], is.factor)]
 pairs <- combn(factCols, 2, simplify=FALSE)
 
 cl <- makeCluster(threads)
@@ -385,15 +443,15 @@ set.seed(120)
 out <- foreach(i=1:length(pairs), .combine='comb', .multicombine=TRUE,
                .init=list(list(), list()), .packages=c("sqldf", "data.table")) %dorng% {
                  name <- paste0(pairs[[i]][1], "_", pairs[[i]][2], "_cnt2") 
-                 tmp <- my.f2cnt(ts2, pairs[[i]][1], pairs[[i]][2])
-                 if (var(tmp[ts2$filter==0]) != 0) # exclude columns with no variance in the training set
+                 tmp <- my.f2cnt(ts1, pairs[[i]][1], pairs[[i]][2])
+                 if (var(tmp[ts1$filter==0]) != 0) # exclude columns with no variance in the training set
                    list(tmp, name)
                }
 stopCluster(cl)
 pairCnts <- as.data.frame(out[[1]])
 colnames(pairCnts) <- unlist(out[[2]])
 
-ts2 <- cbind(ts2, pairCnts)
+ts1 <- cbind(ts1, pairCnts)
 rm(pairCnts); gc()
 
 # 2-way averages
@@ -403,7 +461,7 @@ set.seed(121)
 out <- foreach(i=1:length(pairs), .combine='comb', .multicombine=TRUE,
                .init=list(list(), list()), .packages=c("sqldf", "data.table","VGAM")) %dorng% {
                  name <- paste0(paste0(pairs[[i]],collapse="_"), "_targetMean2way")
-                 tmp <- catNWayAvgCV(data = ts2, pairs[[i]], y = "target",pred0 = "pred0",filter = ts2$filter==0, k = 20, f = 10, r_k = 0.04, cv=cvFoldsList)
+                 tmp <- catNWayAvgCV(data = ts1, pairs[[i]], y = "target",pred0 = "pred0",filter = ts1$filter==0, k = 20, f = 10, r_k = 0.04, cv=cvFoldsList)
                  tmp <- logit(pmin(pmax(tmp, 1e-15), 1-1e-15))
                  list(tmp, name)
                }
@@ -412,38 +470,30 @@ pairMeans <- as.data.frame(out[[1]])
 colnames(pairMeans) <- unlist(out[[2]])
 
 
-ts2 <- cbind(ts2, pairMeans)
+ts1 <- cbind(ts1, pairMeans)
 rm(pairMeans); gc()
 ################
 ## Add 3-way counts
 ################
 triplets <- combn(c("v3","v10","v22","v24","v30","v38","v47", "v52", "v56", "v62","v66","v72","v74", "v75","v79", "v91","v110","v112","v113","v125","v129"), 3, simplify=FALSE)
-# triplets <- combn(c("v3","v22", "v52", "v56","v66","v72","v79", "v110","v113"), 3, simplify=FALSE)
-# triplets <- combn(factCols, 3, simplify=FALSE)
-# triplets2 <- combn(setdiff(factCols, c("v3","v22","v24","v30","v38","v47", "v52", "v56", "v62","v66","v72","v74", "v75","v79", "v91","v110","v112","v113","v125","v129")), 3, simplify=FALSE)
-# set.seed(900)
-# triplets <- combn(sample(factCols, size = 12, replace = FALSE), 3, simplify=FALSE)
 cl <- makeCluster(threads)
 registerDoParallel(cl)
 set.seed(122)
 out <- foreach(i=1:length(triplets), .combine='comb', .multicombine=TRUE,
                .init=list(list(), list()), .packages=c("sqldf", "data.table")) %dorng% {
                  name <- paste0(triplets[[i]][1], "_", triplets[[i]][2],"_",triplets[[i]][3], "_cnt3") 
-                 tmp <- my.f3cnt(ts2, triplets[[i]][1], triplets[[i]][2], triplets[[i]][3])
-                 if (var(tmp[ts2$filter==0]) != 0)  # exclude columns with no variance in the training set
+                 tmp <- my.f3cnt(ts1, triplets[[i]][1], triplets[[i]][2], triplets[[i]][3])
+                 if (var(tmp[ts1$filter==0]) != 0)  # exclude columns with no variance in the training set
                    list(tmp, name)
                }
 stopCluster(cl)
 tripCnts <- as.data.frame(out[[1]])
 colnames(tripCnts) <- unlist(out[[2]])
 
-ts2 <- cbind(ts2, tripCnts)
+ts1 <- cbind(ts1, tripCnts)
 rm(tripCnts); gc()
 
-
-# 3-way averages
-triplets <- combn(c("v3","v10","v22","v24","v30","v38","v47", "v52", "v56", "v62","v66","v72","v74", "v75","v79", "v91","v110","v112","v113","v125","v129"), 3, simplify=FALSE)
-# add v22
+# add v22 to comb2List 
 comb2List_v22 <- lapply(comb2List, function(x) c(x,"v22"))
 triplets <- c(triplets, comb2List_v22)
 # sort vectors and remove duplicates
@@ -456,7 +506,7 @@ set.seed(123)
 out <- foreach(i=1:length(triplets), .combine='comb', .multicombine=TRUE,
                .init=list(list(), list()), .packages=c("sqldf", "data.table","VGAM")) %dorng% {
                  name <- paste0(paste0(triplets[[i]],collapse="_"), "_targetMean3way")
-                 tmp <- catNWayAvgCV(data = ts2, triplets[[i]], y = "target",pred0 = "pred0",filter = ts2$filter==0, k = 20, f = 10, r_k = 0.04, cv=cvFoldsList)
+                 tmp <- catNWayAvgCV(data = ts1, triplets[[i]], y = "target",pred0 = "pred0",filter = ts1$filter==0, k = 20, f = 10, r_k = 0.04, cv=cvFoldsList)
                  tmp <- logit(pmin(pmax(tmp, 1e-15), 1-1e-15))
                  list(tmp, name)
                }
@@ -464,48 +514,20 @@ stopCluster(cl)
 tripMeans <- as.data.frame(out[[1]])
 colnames(tripMeans) <- unlist(out[[2]])
 
-ts2 <- cbind(ts2, tripMeans)
+ts1 <- cbind(ts1, tripMeans)
 rm(tripMeans); gc()
 
 ################
-## Add 4-way counts
+## Add 4-way averages
 ################
-# quads <- combn(c("v3","v22","v24","v47","v52","v56", "v66","v72", "v74", "v79","v113","v125","v129"), 4, simplify=FALSE)
-# # set.seed(901)
-# # quads2 <- combn(sample(setdiff(factCols, c("v3","v22","v24","v47","v52","v56", "v66","v72", "v74", "v79","v113","v125","v129")),10,replace=FALSE), 4, simplify=FALSE)
-# # set.seed(901)
-# # # quads <- combn(sample(factCols, 10, replace=FALSE), 4, simplify=FALSE)
-# cl <- makeCluster(threads)
-# registerDoParallel(cl)
-# set.seed(125)
-# out <- foreach(i=1:length(quads), .combine='comb', .multicombine=TRUE,
-#                .init=list(list(), list()), .packages=c("sqldf", "data.table")) %dorng% {
-#                  name <- paste0(quads[[i]][1], "_", quads[[i]][2],"_",quads[[i]][3], "_",quads[[i]][4],"_cnt4") 
-#                  tmp <- my.f4cnt(ts2, quads[[i]][1], quads[[i]][2], quads[[i]][3], quads[[i]][4])
-#                  if (var(tmp[ts2$filter==0]) != 0)  # exclude columns with no variance in the training set
-#                    list(tmp, name)
-#                }
-# stopCluster(cl)
-# quadCnts <- as.data.frame(out[[1]])
-# colnames(quadCnts) <- unlist(out[[2]])
-# 
-# ts2 <- cbind(ts2, quadCnts)
-# rm(quadCnts); gc()
-
-# 4-way averages
-# quads <- combn(c("v3","v22","v24","v47","v52","v56", "v66","v72", "v74", "v79","v113","v125","v129"), 4, simplify=FALSE)
-# add v22
 quads <- lapply(comb3List, function(x) c(x,"v22"))
-# quads <- c(triplets, comb3List_v22)
-# sort vectors and remove duplicates
-# quads <- unique(lapply(triplets, function(x) sort(x)))
 cl <- makeCluster(threads)
 registerDoParallel(cl)
 set.seed(127)
 out <- foreach(i=1:length(quads), .combine='comb', .multicombine=TRUE,
                .init=list(list(), list()), .packages=c("sqldf", "data.table","VGAM")) %dorng% {
                  name <- paste0(paste0(quads[[i]],collapse="_"), "_targetMean4way")
-                 tmp <- catNWayAvgCV(data = ts2, quads[[i]], y = "target",pred0 = "pred0",filter = ts2$filter==0, k = 20, f = 10, r_k = 0.04, cv=cvFoldsList)
+                 tmp <- catNWayAvgCV(data = ts1, quads[[i]], y = "target",pred0 = "pred0",filter = ts1$filter==0, k = 20, f = 10, r_k = 0.04, cv=cvFoldsList)
                  tmp <- logit(pmin(pmax(tmp, 1e-15), 1-1e-15))
                  list(tmp, name)
                }
@@ -513,44 +535,21 @@ stopCluster(cl)
 quadMeans <- as.data.frame(out[[1]])
 colnames(quadMeans) <- unlist(out[[2]])
 
-ts2 <- cbind(ts2, quadMeans)
+ts1 <- cbind(ts1, quadMeans)
 rm(quadMeans); gc()
 
 
 ################
-## Add 5-way counts
+## Add 5-way averages
 ################
 quints <- lapply(comb4List, function(x) c(x,"v22"))
-# quints <- combn(c("v22","v24","v47","v52","v56", "v66","v72", "v79","v113","v125","v129"), 5, simplify=FALSE)
-# # set.seed(902)
-# # quints2 <- combn(sample(setdiff(factCols, c("v22","v24","v47","v52","v56", "v66","v72", "v79","v113","v125","v129")),10,replace=FALSE), 5, simplify=FALSE)
-# # set.seed(902)
-# # quints <- combn(sample(factCols, 10, replace=FALSE), 5, simplify=FALSE)
-# cl <- makeCluster(threads)
-# registerDoParallel(cl)
-# set.seed(129)
-# out <- foreach(i=1:length(quints), .combine='comb', .multicombine=TRUE,
-#                .init=list(list(), list()), .packages=c("sqldf", "data.table")) %dorng% {
-#                  name <- paste0(quints[[i]][1], "_", quints[[i]][2],"_",quints[[i]][3], "_",quints[[i]][4], "_",quints[[i]][5],"_cnt5") 
-#                  tmp <- my.f5cnt(ts2, quints[[i]][1], quints[[i]][2], quints[[i]][3], quints[[i]][4], quints[[i]][5])
-#                  if (var(tmp[ts2$filter==0]) != 0)  # exclude columns with no variance in the training set
-#                    list(tmp, name)
-#                }
-# stopCluster(cl)
-# quintCnts <- as.data.frame(out[[1]])
-# colnames(quintCnts) <- unlist(out[[2]])
-# 
-# ts2 <- cbind(ts2, quintCnts)
-# rm(quintCnts); gc()
-# 
-# 5-way averages
 cl <- makeCluster(threads)
 registerDoParallel(cl)
 set.seed(131)
 out <- foreach(i=1:length(quints), .combine='comb', .multicombine=TRUE,
                .init=list(list(), list()), .packages=c("sqldf", "data.table","VGAM")) %dorng% {
                  name <- paste0(paste0(quints[[i]],collapse="_"), "_targetMean5way")
-                 tmp <- catNWayAvgCV(data = ts2, quints[[i]], y = "target",pred0 = "pred0",filter = ts2$filter==0, k = 20, f = 10, r_k = 0.04, cv=cvFoldsList)
+                 tmp <- catNWayAvgCV(data = ts1, quints[[i]], y = "target",pred0 = "pred0",filter = ts1$filter==0, k = 20, f = 10, r_k = 0.04, cv=cvFoldsList)
                  tmp <- logit(pmin(pmax(tmp, 1e-15), 1-1e-15))
                  list(tmp, name)
                }
@@ -558,89 +557,22 @@ stopCluster(cl)
 quintMeans <- as.data.frame(out[[1]])
 colnames(quintMeans) <- unlist(out[[2]])
 
-ts2 <- cbind(ts2, quintMeans)
+ts1 <- cbind(ts1, quintMeans)
 rm(quintMeans); gc()
 
 
-################
-## Add 6-way counts
-################
-# #Remove v52, add v110
-# sextups <- combn(c("v22","v24","v47","v56", "v66","v72", "v79","v110","v113","v125","v129"), 6, simplify=FALSE)
-# # set.seed(903)
-# # sextups2 <- combn(sample(setdiff(factCols, c("v22","v24","v47","v56", "v66","v72", "v79","v110","v113","v125","v129")), 10, replace=FALSE), 6, simplify=FALSE)
-# # set.seed(903)
-# # sextups <- combn(sample(factCols, 10, replace=FALSE), 6, simplify=FALSE)
-# cl <- makeCluster(threads)
-# registerDoParallel(cl)
-# set.seed(133)
-# out <- foreach(i=1:length(sextups), .combine='comb', .multicombine=TRUE,
-#                .init=list(list(), list()), .packages=c("sqldf", "data.table")) %dorng% {
-#                  name <- paste0(sextups[[i]][1], "_", sextups[[i]][2],"_",sextups[[i]][3], "_",sextups[[i]][4], "_",sextups[[i]][5], "_",sextups[[i]][6], "_cnt6") 
-#                  tmp <- my.f6cnt(ts2, sextups[[i]][1], sextups[[i]][2], sextups[[i]][3], sextups[[i]][4], sextups[[i]][5], sextups[[i]][6])
-#                  if (var(tmp[ts2$filter==0]) != 0)  # exclude columns with no variance in the training set
-#                    list(tmp, name)
-#                }
-# stopCluster(cl)
-# sextupCnts <- as.data.frame(out[[1]])
-# colnames(sextupCnts) <- unlist(out[[2]])
-# 
-# ts2 <- cbind(ts2, sextupCnts)
-# rm(sextupCnts); gc()
-# 
-# # 6-way averages
-# cl <- makeCluster(threads)
-# registerDoParallel(cl)
-# set.seed(135)
-# out <- foreach(i=1:length(sextups), .combine='comb', .multicombine=TRUE,
-#                .init=list(list(), list()), .packages=c("sqldf", "data.table","VGAM")) %dorng% {
-#                  name <- paste0(sextups[[i]][1],"_",sextups[[i]][2], "_", sextups[[i]][3],  "_", sextups[[i]][4],  "_", sextups[[i]][5], "_", sextups[[i]][6], "_targetMean6way")
-#                  tmp <- cat6WayAvgCV(data = ts2, var1 = sextups[[i]][1], var2 = sextups[[i]][2], var3 = sextups[[i]][3], var4 = sextups[[i]][4], var5 = sextups[[i]][5], var6 = sextups[[i]][6], y = "target",pred0 = "pred0",filter = ts2$filter==0, k = 20, f = 10, r_k = 0.03, cv=cvFoldsList10)
-#                  tmp <- logit(pmin(pmax(tmp, 1e-15), 1-1e-15))
-#                  list(tmp, name)
-#                }
-# stopCluster(cl)
-# sextupMeans <- as.data.frame(out[[1]])
-# colnames(sextupMeans) <- unlist(out[[2]])
-# 
-# ts2 <- cbind(ts2, sextupMeans)
-# rm(sextupMeans); gc()
 
 ################
-## Add 7-way counts
+## Add 7-way averages
 ################
-#Remove v52, add v110
 septups <- combn(c("v22","v10","v24","v47","v52","v56", "v66","v72", "v74", "v79","v110","v113","v125","v129"), 7, simplify=FALSE)
-# set.seed(903)
-# septups2 <- combn(sample(setdiff(factCols, c("v22","v24","v47","v56", "v66","v72", "v79","v110","v113","v125","v129")), 10, replace=FALSE), 6, simplify=FALSE)
-# set.seed(903)
-# septups <- combn(sample(factCols, 10, replace=FALSE), 7, simplify=FALSE)
-
-# cl <- makeCluster(threads)
-# registerDoParallel(cl)
-# set.seed(133)
-# out <- foreach(i=1:length(septups), .combine='comb', .multicombine=TRUE,
-#                .init=list(list(), list()), .packages=c("sqldf", "data.table")) %dorng% {
-#                  name <- paste0(septups[[i]][1], "_", septups[[i]][2],"_",septups[[i]][3], "_",septups[[i]][4], "_",septups[[i]][5], "_",septups[[i]][6], "_",septups[[i]][7], "_cnt7") 
-#                  tmp <- my.f7cnt(ts2, septups[[i]][1], septups[[i]][2], septups[[i]][3], septups[[i]][4], septups[[i]][5], septups[[i]][6], septups[[i]][7])
-#                  if (var(tmp[ts2$filter==0]) != 0)  # exclude columns with no variance in the training set
-#                    list(tmp, name)
-#                }
-# stopCluster(cl)
-# septupsCnts <- as.data.frame(out[[1]])
-# colnames(septupsCnts) <- unlist(out[[2]])
-# 
-# ts2 <- cbind(ts2, septupCnts)
-# rm(septupCnts); gc()
-
-# 7-way averages
 cl <- makeCluster(threads)
 registerDoParallel(cl)
 set.seed(135)
 out <- foreach(i=1:length(septups), .combine='comb', .multicombine=TRUE,
                .init=list(list(), list()), .packages=c("sqldf", "data.table","VGAM")) %dorng% {
                  name <- paste0(paste0(septups[[i]],collapse="_"), "_targetMean7way")
-                 tmp <- catNWayAvgCV(data = ts2, septups[[i]], y = "target",pred0 = "pred0",filter = ts2$filter==0, k = 20, f = 10, r_k = 0.04, cv=cvFoldsList)
+                 tmp <- catNWayAvgCV(data = ts1, septups[[i]], y = "target",pred0 = "pred0",filter = ts1$filter==0, k = 20, f = 10, r_k = 0.04, cv=cvFoldsList)
                  tmp <- logit(pmin(pmax(tmp, 1e-15), 1-1e-15))
                  list(tmp, name)
                }
@@ -648,89 +580,17 @@ stopCluster(cl)
 septupsMeans <- as.data.frame(out[[1]])
 colnames(septupsMeans) <- unlist(out[[2]])
 
-ts2 <- cbind(ts2, septupsMeans)
+ts1 <- cbind(ts1, septupsMeans)
 rm(septupsMeans); gc()
-
-################
-## Add 9-way counts
-################
-# nonuplets <- combn(c("v3","v22","v24","v47","v52","v56", "v66","v72", "v74", "v79","v91","v110","v113","v125","v129"), 9, simplify=FALSE)
-# # set.seed(903)
-# # nonuplets2 <- combn(sample(setdiff(factCols, c("v22","v24","v47","v56", "v66","v72", "v79","v110","v113","v125","v129")), 10, replace=FALSE), 6, simplify=FALSE)
-# # set.seed(903)
-# # nonuplets <- combn(sample(factCols, 10, replace=FALSE), 9, simplify=FALSE)
-# 
-# # cl <- makeCluster(threads)
-# # registerDoParallel(cl)
-# # set.seed(133)
-# # out <- foreach(i=1:length(nonuplets), .combine='comb', .multicombine=TRUE,
-# #                .init=list(list(), list()), .packages=c("sqldf", "data.table")) %dorng% {
-# #                  name <- paste0(nonuplets[[i]][1], "_", nonuplets[[i]][2],"_",nonuplets[[i]][3], "_",nonuplets[[i]][4], "_",nonuplets[[i]][5], "_",nonuplets[[i]][6], "_",nonuplets[[i]][7],nonuplets[[i]][8],nonuplets[[i]][9], "_cnt9") 
-# #                  tmp <- my.f9cnt(ts2, nonuplets[[i]][1], nonuplets[[i]][2], nonuplets[[i]][3], nonuplets[[i]][4], nonuplets[[i]][5], nonuplets[[i]][6], nonuplets[[i]][7])
-# #                  if (var(tmp[ts2$filter==0]) != 0)  # exclude columns with no variance in the training set
-# #                    list(tmp, name)
-# #                }
-# # stopCluster(cl)
-# # nonupletsCnts <- as.data.frame(out[[1]])
-# # colnames(nonupletsCnts) <- unlist(out[[2]])
-# # 
-# # ts2 <- cbind(ts2, nonupletsCnts)
-# # rm(septupCnts); gc()
-# 
-# # # 9-way averages
-# cl <- makeCluster(threads)
-# registerDoParallel(cl)
-# set.seed(135)
-# out <- foreach(i=1:length(nonuplets), .combine='comb', .multicombine=TRUE,
-#                .init=list(list(), list()), .packages=c("sqldf", "data.table","VGAM")) %dorng% {
-#                  name <- paste0(paste0(nonuplets[[i]],collapse="_"), "_targetMean9way")
-#                  tmp <- catNWayAvgCV(data = ts2, nonuplets[[i]], y = "target",pred0 = "pred0",filter = ts2$filter==0, k = 10, f = 10, r_k = 0.03, cv=cvFoldsList10)
-#                  tmp <- logit(pmin(pmax(tmp, 1e-15), 1-1e-15))
-#                  list(tmp, name)
-#                }
-# stopCluster(cl)
-# nonupletsMeans <- as.data.frame(out[[1]])
-# colnames(nonupletsMeans) <- unlist(out[[2]])
-# 
-# ts2 <- cbind(ts2, nonupletsMeans)
-# rm(nonupletsMeans); gc()
-# Combine results
-# ts2 <- cbind(ts2, pairInts, pairCnts, pairMeans, tripCnts, tripMeans,  quadCnts, quadMeans, quintCnts, quintMeans, sextupCnts, sextupMeans)
-# rm(pairInts, pairCnts, pairMeans, tripCnts, tripMeans,  quadCnts, quadMeans, quintCnts, quintMeans,  sextupCnts, sextupMeans)
-
-# ts2 <- cbind(ts2, pairInts, pairCnts, pairMeans, tripCnts, tripMeans, quintCnts, quintMeans, septupsCnts, septupsMeans)
-# rm(pairInts, pairCnts, pairMeans, tripCnts, tripMeans, quintCnts, quintMeans,  septupsCnts, septupsMeans)
-# gc()
-## Log Feature ratios from Telstra, may be useful for ratios here
-
-# for (i in 1:length(pairs)){
-#   name <- paste0(pairs[[i]][1], "_", pairs[[i]][2],"_ratio") 
-#   tmp <- as.data.frame(featCast[,pairs[[i]][1], with=FALSE] / featCast[,pairs[[i]][2], with=FALSE])
-#   tmp <- do.call(data.frame,lapply(tmp, function(x) replace(x, is.infinite(x), 99999)))
-#   tmp <- replace(tmp, is.na(tmp), -1)
-#   ts2[,name] <- tmp
-# }
-
-#####################
-# 3 way interaction indicator
-#####################
-# triplets <- combn(charCols, 3, simplify=FALSE)
-# for (i in 1:length(triplets)){
-#   name <- paste0(triplets[[i]][1], "_", triplets[[i]][2], "_", triplets[[i]][3], "_int") 
-#   tmp <- int3WayBool(featCast, triplets[[i]][1], triplets[[i]][2], triplets[[i]][3])
-#   if (sum(tmp[ts2$filter==0]) == 0) next else # exclude columns with no variance in the training set
-#     ts2[,name] <- tmp
-# }
-
 
 ############
 ## PAIRWISE CORRELATIONS -- code & idea from Tian Zhou - teammate in Homesite competition
 ############
 # Remove features with correlations equal to 1
-numCols <- colnames(ts2[,-excludeCols,with=FALSE])[sapply(ts2[,-excludeCols,with=FALSE], is.numeric)]
-# boruta_results <- Boruta(as.factor(target) ~ ., ts2[filter==0,-c("dummy","pred0","ID","filter"),with=FALSE], holdHistory=FALSE, maxRuns=100) 
-enableWGCNAThreads(threads)
-featCor <- corFast(ts2[,numCols,with=FALSE], nThreads=threads)
+numCols <- colnames(ts1[,-excludeCols,with=FALSE])[sapply(ts1[,-excludeCols,with=FALSE], is.numeric)]
+# boruta_results <- Boruta(as.factor(target) ~ ., ts1[filter==0,-c("dummy","pred0","ID","filter"),with=FALSE], holdHistory=FALSE, maxRuns=100) 
+# enableWGCNAThreads(threads)
+system.time(featCor <- cor(ts1[,numCols,with=FALSE]))
 hc <- findCorrelation(featCor, cutoff=0.997 ,names=TRUE)  
 hc <- sort(hc)
 save(featCor, file="./data_trans/featCor_v31.rda")
@@ -746,42 +606,46 @@ goldFeats <- 300
 feat_gold <- gold_features(featCorDF, goldFeats)
 
 # Do not parallelize -- too much memory for some reason
+cl <- makeCluster(1)
+registerDoParallel(cl)
 set.seed(136)
 out <- foreach(i=1:length(feat_gold), .combine='comb', .multicombine=TRUE,
                .init=list(list(), list()), .packages=c("data.table")) %dorng% {
                  name <- paste0(feat_gold[[i]][[1]],"_",feat_gold[[i]][[2]],"_cor")
-                 tmp <- ts2[,as.character(feat_gold[[i]][[1]]), with=FALSE] - ts2[,as.character(feat_gold[[i]][[2]]), with=FALSE]
+                 tmp <- ts1[,as.character(feat_gold[[i]][[1]]), with=FALSE] - ts1[,as.character(feat_gold[[i]][[2]]), with=FALSE]
                  list(tmp, name)
                }
+stopCluster(cl)
 goldMeans <- as.data.frame(out[[1]])
 colnames(goldMeans) <- unlist(out[[2]])
 
-ts2 <- cbind(ts2, goldMeans)
+ts1 <- cbind(ts1, goldMeans)
 rm(goldMeans)
 gc()
 
-
-goldFeats2 <- 100
-feat_gold <- gold_featuresUnCor(featCorDF, goldFeats2)
+goldFeats <- 100
+feat_gold <- gold_featuresUnCor(featCorDF, goldFeats)
 
 # Do not parallelize -- too much memory for some reason
+cl <- makeCluster(1)
+registerDoParallel(cl)
 set.seed(136)
 out <- foreach(i=1:length(feat_gold), .combine='comb', .multicombine=TRUE,
                .init=list(list(), list()), .packages=c("data.table")) %dorng% {
                  name <- paste0(feat_gold[[i]][[1]],"_",feat_gold[[i]][[2]],"_corAdd")
-                 tmp <- ts2[,as.character(feat_gold[[i]][[1]]), with=FALSE] + ts2[,as.character(feat_gold[[i]][[2]]), with=FALSE]
+                 tmp <- ts1[,as.character(feat_gold[[i]][[1]]), with=FALSE] + ts1[,as.character(feat_gold[[i]][[2]]), with=FALSE]
                  list(tmp, name)
                }
-
+stopCluster(cl)
 goldAdds <- as.data.frame(out[[1]])
 colnames(goldAdds) <- unlist(out[[2]])
 
-ts2 <- cbind(ts2, goldAdds)
+ts1 <- cbind(ts1, goldAdds)
 rm(goldAdds)
 gc()
 
 if (length(c(hc,as.character(featCorDF$V2[1:goldFeats])))>0)
-  ts2 <- ts2[,-c(hc,as.character(featCorDF$V2[1:goldFeats])),with=FALSE]
+  ts1 <- ts1[,-c(hc,as.character(featCorDF$V2[1:goldFeats])),with=FALSE]
 ######################################################
 
 
@@ -789,23 +653,26 @@ if (length(c(hc,as.character(featCorDF$V2[1:goldFeats])))>0)
 ## Helper columns
 ############
 # Scale variables so a few don't overpower the helper columns
-pp <- preProcess(ts2[filter==0,-excludeCols,with=FALSE], method=c("zv","center","scale","medianImpute"))
-ts2 <- predict(pp, ts2)
+pp <- preProcess(ts1[filter==0,-excludeCols,with=FALSE], method=c("zv","center","scale","medianImpute"))
+ts1 <- predict(pp, ts1)
 
-summ <- as.data.frame(ts2[ts2$filter==0, colnames(ts2) %in% c("target",numCols),with=FALSE] %>% group_by(target) %>%
+summ <- as.data.frame(ts1[ts1$filter==0, colnames(ts1) %in% c("target",numCols),with=FALSE] %>% group_by(target) %>%
                         summarise_each(funs(mean)))
+cols <- c("target",numCols)
+summ <- ts1[filter==0, colnames(ts1) %in% cols, with=FALSE][,lapply(.SD, mean) , by=target]
+
 # Find means and sd's for columns
-mn1 <- sapply(summ[,2:ncol(summ)], mean)
-sd1 <- sapply(summ[,2:ncol(summ)], sd)
+mn1 <- sapply(summ[,2:ncol(summ),with=F], mean)
+sd1 <- sapply(summ[,2:ncol(summ),with=F], sd)
 # Find upper and lower thresholds
 hi <- mn1+2*sd1
 lo <- mn1-2*sd1
 
 helpCols <- list()
 for (i in 0:1){
-  tmpHi <- (summ[summ$target==i,2:ncol(summ)] - mn1)/sd1
-  hiNames <- colnames(tmpHi[,order(tmpHi)][,1:30])
-  loNames <- colnames(tmpHi[,order(tmpHi,decreasing = TRUE)][1:30])
+  tmpHi <- (summ[summ$target==i,2:ncol(summ),with=F] - mn1)/sd1
+  hiNames <- colnames(tmpHi[,order(tmpHi),with=F][,1:30,with=F])
+  loNames <- colnames(tmpHi[,order(tmpHi,decreasing = TRUE), with=F][,1:30,with=F])
   
   helpCols[[i+1]] <- c(hiNames, loNames)
   
@@ -813,66 +680,50 @@ for (i in 0:1){
 names(helpCols) <- paste0("X", seq_along(helpCols)-1)
 
 for (i in 0:1){
-  ts2[[ncol(ts2)+1]] <- rowSums(ts2[,helpCols[[i+1]], with=FALSE])
-  colnames(ts2)[ncol(ts2)] <- paste0("X", i, "_helper")
+  ts1[[ncol(ts1)+1]] <- rowSums(ts1[,helpCols[[i+1]], with=FALSE])
+  colnames(ts1)[ncol(ts1)] <- paste0("X", i, "_helper")
 }
 
 ##################
 ## Create summary variables for high-dimensional factors
 ##################
-factorCols <- colnames(ts2)[sapply(ts2, is.factor)]
-highCardFacts <- colnames(ts2[,factorCols,with=FALSE])[sapply(ts2[,factorCols,with=FALSE], function(x) length(unique(x))>30)]
+factorCols <- colnames(ts1)[sapply(ts1, is.factor)]
+highCardFacts <- colnames(ts1[,factorCols,with=FALSE])[sapply(ts1[,factorCols,with=FALSE], function(x) length(unique(x))>30)]
 
 for(ii in highCardFacts) {
   print(ii)
-  x <- data.frame(x1=ts2[, ii,with=FALSE])
+  x <- data.frame(x1=ts1[, ii,with=FALSE])
   x[,ii] <- as.numeric(x[,ii])
-  ts2[, paste(ii, "_num", sep="")] <- x
+  ts1[, paste(ii, "_num", sep="")] <- x
 }
 
 
 for(ii in highCardFacts) {
   print(ii)
-  x <- data.frame(x1=ts2[, ii,with=FALSE])
+  x <- data.table(x1=ts1[, ii,with=FALSE])
   colnames(x) <- "x1"
   x$x1 <- as.numeric(x$x1)
-  sum1 <- sqldf("select x1, sum(1) as cnt
-                from x  group by 1 ")
-  tmp <- sqldf("select cnt from x a left join sum1 b on a.x1=b.x1")
-  ts2[, paste(ii, "_cnt", sep="")] <- tmp$cnt
+  sum1 <- x[, list(cnt=.N), by=x1]
+  tmp <- merge(x, sum1, by="x1", all.x=T)
+  ts1[, paste(ii, "_cnt", sep="")] <- tmp$cnt
 }
 
 # Replace high cardinality factors with target mean
 for(ii in highCardFacts) {
   name <- paste0(ii, "_targetMean")
-  ts2[,name] <- catNWayAvgCV(data = ts2, c(ii, "dummy"), y = "target",pred0 = "pred0",filter = ts2$filter==0, k = 20, f = 10, r_k = 0.04, cv=cvFoldsList)
+  ts1[,name] <- catNWayAvgCV(data = ts1, c(ii, "dummy"), y = "target",pred0 = "pred0",filter = ts1$filter==0, k = 20, f = 10, r_k = 0.04, cv=cvFoldsList)
 }
 
 
-ts2 <- ts2[,!colnames(ts2) %in% highCardFacts,with=FALSE]
+ts1 <- ts1[,!colnames(ts1) %in% highCardFacts,with=FALSE]
 
 ##################
 ## Create dummy variables for low-dimensional factors
 ##################
 
-dummy <- dummyVars( ~. -1, data = ts2[,-c("dummy","pred0"),with=FALSE])
-ts2 <- data.frame(predict(dummy, ts2))
+dummy <- dummyVars( ~. -1, data = ts1[,-c("dummy","pred0"),with=FALSE])
+ts1 <- data.frame(predict(dummy, ts1))
 
-# varnames <- c(names(ts2[, !colnames(ts2) %in% c("ID","target","filter","dummy","pred0")]))
-# 
-# ts2_pca <- preProcess(ts2[,varnames], method = c("pca","center","scale"), pcaComp=100)
-# ts2_pca_feats <- predict(ts2_pca, ts2[,varnames])
-# 
-# set.seed(201601)
-# tsne_feats <- Rtsne(data.matrix(ts2_pca_feats), dims=2, initial_dims = 100, perplexity=30, theta=0.1, pca=FALSE, check_duplicates=FALSE, max_iter=500, verbose=TRUE)
-# tsne_Y <- as.data.frame(tsne_feats$Y)
-# colnames(tsne_Y) <- c("tsne_1", "tsne_2")
-# tsne_Y <- cbind(ID=ts2$ID, tsne_Y)
-# write.csv(tsne_Y, "./data_trans/tsne_v24.csv", row.names=FALSE)
-# tsne_Y$target <- as.factor(make.names(ts2$target))
-# (gg <- ggplot(tsne_Y[ts2$filter==0,], aes(x=tsne_1, y=tsne_2, colour=target)) + geom_point(size=1))
-# 
-# ts2<- cbind(ts2, tsne_Y[,2:3])
 
 ###################
 ## Write CSV file
@@ -880,5 +731,5 @@ ts2 <- data.frame(predict(dummy, ts2))
 write.csv(as.data.frame(helpCols), "./data_trans/helpCols_v31.csv", row.names=FALSE)
 save(helpCols, file="./data_trans/helpCols_v31.rda")
 
-ts2 <- ts2[order(ts2$filter, ts2$ID),]
-write_csv(ts2, "./data_trans/ts2Trans_v31.csv")
+ts1 <- ts1[order(ts1$filter, ts1$ID),]
+write.csv(ts1, "./data_trans/ts2Trans_v31.csv")

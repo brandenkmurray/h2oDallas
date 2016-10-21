@@ -2,9 +2,7 @@ library(xgboost)
 library(data.table)
 library(readr)
 library(Matrix)
-library(Rtsne)
-library(ggplot2)
-setwd("/media/branden/SSHD1/kaggle/bnp")
+setwd("/Users/branden/h2oDallas/")
 ts1Trans <-fread("./data_trans/ts2Trans_v31.csv")
 # xgbImpVars <- data.table(read_csv("./stack_models/xgb21Imp.csv"))
 load("./data_trans/cvFoldsList.rda")
@@ -22,7 +20,7 @@ param <- list(objective="binary:logistic",
                 min_child_weight=1,
                 subsample=.8,
                 colsample_bytree=.4,
-                nthread=13
+                nthread=6
   )
   
 set.seed(201512)
@@ -37,6 +35,9 @@ xgb46cv <- xgb.cv(data = dtrain,
                    early.stop.round=200)
 Sys.time() - tme
 save(xgb46cv, file="./stack_models/xgb46cv.rda")
+# min(xgb46cv$dt$test.logloss.mean)
+# best score -- 0.463343
+
 
 write.csv(data.frame(ID=ts1Trans[filter==0,"ID",with=FALSE], PredictedProb=xgb46cv$pred), "./stack_models/cvPreds/cvPreds_xgb46.csv", row.names=FALSE)
 
