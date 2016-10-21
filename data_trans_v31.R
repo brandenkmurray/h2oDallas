@@ -599,31 +599,33 @@ rm(septupsMeans); gc()
 # hc <- sort(hc)
 # save(featCor, file="./data_trans/featCor_v31.rda")
 
+
+# 
+# featCorDF <- abs(featCor[!rownames(featCor) %in% hc, !colnames(featCor) %in% hc])
+# featCorDF[upper.tri(featCorDF, diag=TRUE)] <- NA
+# featCorDF <- melt(featCorDF, varnames = c('V1','V2'), na.rm=TRUE)
+# featCorDF <- featCorDF[order(featCorDF$value, decreasing=TRUE),]
+# 
+# goldFeats <- 300
+# feat_gold <- gold_features(featCorDF, goldFeats)
+# 
+# # Do not parallelize -- too much memory for some reason
+# cl <- makeCluster(1)
+# registerDoParallel(cl)
+# set.seed(136)
+# out <- foreach(i=1:length(feat_gold), .combine='comb', .multicombine=TRUE,
+#                .init=list(list(), list()), .packages=c("data.table")) %dorng% {
+#                  name <- paste0(feat_gold[[i]][[1]],"_",feat_gold[[i]][[2]],"_cor")
+#                  tmp <- ts1[,as.character(feat_gold[[i]][[1]]), with=FALSE] - ts1[,as.character(feat_gold[[i]][[2]]), with=FALSE]
+#                  list(tmp, name)
+#                }
+# stopCluster(cl)
+# goldMeans <- as.data.frame(out[[1]])
+# colnames(goldMeans) <- unlist(out[[2]])
+# write.csv(goldMeans, "./data_trans/goldMeans.csv")
+
 ## Since featCor takes awhile to calculate, we'll import a previously run version to save time
-load("./data_trans/featCor_v31.rda")
-
-featCorDF <- abs(featCor[!rownames(featCor) %in% hc, !colnames(featCor) %in% hc])
-featCorDF[upper.tri(featCorDF, diag=TRUE)] <- NA
-featCorDF <- melt(featCorDF, varnames = c('V1','V2'), na.rm=TRUE)
-featCorDF <- featCorDF[order(featCorDF$value, decreasing=TRUE),]
-
-goldFeats <- 300
-feat_gold <- gold_features(featCorDF, goldFeats)
-
-# Do not parallelize -- too much memory for some reason
-cl <- makeCluster(1)
-registerDoParallel(cl)
-set.seed(136)
-out <- foreach(i=1:length(feat_gold), .combine='comb', .multicombine=TRUE,
-               .init=list(list(), list()), .packages=c("data.table")) %dorng% {
-                 name <- paste0(feat_gold[[i]][[1]],"_",feat_gold[[i]][[2]],"_cor")
-                 tmp <- ts1[,as.character(feat_gold[[i]][[1]]), with=FALSE] - ts1[,as.character(feat_gold[[i]][[2]]), with=FALSE]
-                 list(tmp, name)
-               }
-stopCluster(cl)
-goldMeans <- as.data.frame(out[[1]])
-colnames(goldMeans) <- unlist(out[[2]])
-
+goldMeans <- fread("./data_trans/goldMeans.csv")
 ts1 <- cbind(ts1, goldMeans)
 rm(goldMeans)
 gc()
