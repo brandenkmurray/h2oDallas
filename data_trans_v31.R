@@ -1,25 +1,13 @@
-# library(readr)
 library(data.table)
 library(zoo)
 library(caret)
-# library(e1071)
-# library(Matrix)
-# library(proxy)
-# library(qlcMatrix)
-# library(cccd)
-# library(igraph)
 library(gtools)
-library(plyr)
-library(dplyr)
 library(sqldf)
-# library(DMwR)
-# library(Rtsne)
 library(doParallel)
 library(doRNG)
-# library(WGCNA)
 library(VGAM)
 library(xgboost)
-# library(Boruta)
+library(Amelia)
 setwd("/Users/branden/h2oDallas/")
 load("./data_trans/cvFoldsList.rda")
 threads <- detectCores() - 2 # Used for parallelizing mean encoding feature generation
@@ -33,7 +21,7 @@ source("./data_trans/utils.R")
 #########################################################################################################
 #########################################################################################################
 ## The following feature interaction lists come from Dmitry, one of my teammates during the compeition
-## I believe he got these from the output from XGBFi which will be discussed later
+## I believe he got these from the output from XGBFi which will be shown in a bit
 #########################################################################################################
 #########################################################################################################
 comb2List <- list(c("v50","v6"),c("v21","v5"),c("v10","v12"),c("v50","v78"),
@@ -274,24 +262,24 @@ param <- list(objective="binary:logistic",
 set.seed(201512)
 (tme <- Sys.time())
 xgbBaselineCV <- xgb.cv(data = dtrain,
-                  params = param,
-                  nrounds = 8000,
-                  folds=cvFoldsList,
-                  maximize=FALSE,
-                  prediction=TRUE,
-                  print.every.n = 50,
-                  early.stop.round=200)
+                        params = param,
+                        nrounds = 8000,
+                        folds=cvFoldsList,
+                        maximize=FALSE,
+                        prediction=TRUE,
+                        print.every.n = 50,
+                        early.stop.round=200)
 Sys.time() - tme
-save(xgbBaseline, file = "./stack_models/xgbBaselineCV.rda")
-min(xgbBaseline$dt$test.logloss.mean)
+save(xgbBaselineCV, file = "./stack_models/xgbBaselineCV.rda")
+min(xgbBaselineCV$dt$test.logloss.mean)
 # best logloss -- 0.47658
 
 # Create baseline model for important features and XGBFI
 set.seed(201512)
 (tme <- Sys.time())
 xgbBaseline <- xgb.train(data = dtrain,
-                      params = param,
-                      nrounds = 538) # nrounds from xgbBaseline
+                         params = param,
+                         nrounds = 538) # nrounds from xgbBaseline
 Sys.time() - tme
 xgbImp <- xgb.importance(feature_names = varnames, model = xgbBaseline)
 View(xgbImp)
@@ -306,18 +294,26 @@ View(xgbImp)
 #########################################################################################################
 create_feature_map <- function(fmap_filename, features){
   for (i in 1:length(features)){
-    cat(paste(c(i-1,features[i],"q"), collapse = "\t"), file=fmap_filename, sep="\n",append=TRUE)
+    cat(paste(c(i-1,features[i],"q"), collapse = "\t"), file=fmap_filename, sep="\n", append=TRUE)
   }
 }
 
 # Need to create a feature mapping and then dump the XGBoost model
-create_feature_map("./data_trans/xgbBaseline_fmap.txt", varnames)
+if(!file.exists("./data_trans/xgbBaseline_fmap.txt")){ #Create fmap if it doesn't exist already. May need to delete file first if you get an error during xgb.dump
+  create_feature_map("./data_trans/xgbBaseline_fmap.txt", varnames)
+}
+
 xgb.dump(model=xgbBaseline, fname="./data_trans/xgbBaseline_dump", fmap="./data_trans/xgbBaseline_fmap.txt", with.stats = TRUE)
 # After this you will need to run Xgbfi from the command line (see the GitHub Readme)
 # To save time the output is included in 
 
 #########################################################################################################
 #########################################################################################################
+
+# Recreate ts1 to undo feature engineering done for baseline
+ts1 <- data.table(do.call(smartbind,l))
+# Add pred0, dummy, and filter columns for mean encoding interaction features
+ts1 <- cbind(pred0=mean(t1$target), dummy="A", filter=c(rep(0, nrow(t1)), rep(2, nrow(s1))), ts1)
 
 # v91 and v107 are the same -- just different labels -- so remove v107
 ts1[,v107:=NULL]
@@ -328,8 +324,13 @@ ts1[,v10:=round(v10/0.0218818357511,0)]
 excludeCols <- c("ID","target","filter","dummy","pred0")
 varCols <- setdiff(colnames(ts1), excludeCols)
 
-
-# Creat missingness table
+#########################################################################################################
+#########################################################################################################
+## Create missingness table
+## If you look at the data you will see that rows have similar missingness patterns so we can create a feature
+## that groups together rows with similar missingness patterns. This will better help the GBM split the data.
+#########################################################################################################
+#########################################################################################################
 charCols <- which(sapply(ts1[,-excludeCols,with=FALSE], is.character))
 ts1_miss <- copy(ts1[,-excludeCols,with=FALSE])
 for (col in charCols){
@@ -339,7 +340,13 @@ ts1_miss[!is.na(ts1_miss)] <- 0
 ts1_miss[is.na(ts1_miss)] <- 1
 colnames(ts1_miss) <- paste0(colnames(ts1_miss),"_NA")
 
+## Plot a missingness map
+# ts1_miss[ts_miss==1] <- NA #convert 1's to NAs for missingness map plot
+# missmap(ts1_miss)
+# ts1_miss[is.na(ts1_miss)] <- 1 #convert NAs back to 1
+
 # K-Means Cluster on missingness
+# This will allow us to create a few distinct groups based on missingness
 set.seed(104)
 ts1_kmeans7 <- kmeans(ts1_miss, centers=7, iter.max=50, nstart=5)
 km_y_summ7 <- data.table(target=ts1$target, cluster=ts1_kmeans7$cluster, filter=ts1$filter)
@@ -347,73 +354,69 @@ km7 <- km_y_summ7[filter==0][,list(meanTarget=mean(target)), keyby=cluster]
 km_y_summ7 <- merge(km_y_summ7, km7, by="cluster")
 ts1$km7 <- as.factor(make.names(km_y_summ7$cluster))
 
+
+#########################################################################################################
+#########################################################################################################
+## ROW SUMMARY VARIABLES
+## These find the max, min, mean, etc. values of the numeric columns for each row
+## Also count the number of NAs and 0's
+#########################################################################################################
+#########################################################################################################
+# Identify the numeric columns
 numCols <- names(which(sapply(ts1[,varCols,with=FALSE], is.numeric)))
-# Add row summary variables
+## Add row summary variables
 ts1$rowMax <- apply(ts1[, numCols, with=FALSE], 1, max) 
 ts1$rowMin <- apply(ts1[, numCols, with=FALSE], 1, min) 
 ts1$rowMean <- apply(ts1[, numCols, with=FALSE], 1, mean)
 ts1$rowMed <- apply(ts1[, numCols, with=FALSE], 1, median)
 ts1$rowSD <- apply(ts1[, numCols, with=FALSE], 1, sd)
-# # Create data.table with NA = -1 
-# # Bind with imputed data frame
-# ts1_nafill <- copy(ts1[,numCols,with=FALSE])
-# ts1_nafill[is.na(ts1_nafill)] <- -1
-# colnames(ts1_nafill) <- paste0(colnames(ts1_nafill),"_NAfill")
-
-# excludeCols <- c(excludeCols, "v22")
-
-# Count NAs by row
+## Count NAs by row
 ts1$cntNA <- rowSums(is.na(ts1[, varCols, with=FALSE]))
 ts1$cntZero <- rowSums(ts1[, varCols, with=FALSE] == 0, na.rm=TRUE)
-# round numeric values
+## Round numeric values -- This can sometimes help when a measurement is too granular
 ts1[,(numCols) := round(.SD,4), .SDcols=numCols]
-# Give blank factor levels a name
+## Give blank factor levels a name -- just personal preference
 charCols <- colnames(ts1)[sapply(ts1, is.character)]
-
 for (i in 1:length(charCols)){
   set(ts1, i=which(is.na(ts1[[charCols[i]]])), j=charCols[i], value="NULL")
-  # ts1[,charCols[i],with=FALSE]ts1[,charCols[i],with=FALSE]=="" <- "NULL"
 }
 
-#Convert character columns to factor
+## Convert character columns to factor
+## This will be used later when we dummy code variables
 ts1 <- ts1[,(charCols):=lapply(.SD, as.factor),.SDcols=charCols]
 
-#Convert integer to numeric - some functions give errors
-#These variables may be ordinal
-ts1$v10 <- as.factor(make.names(ts1$v10))
-ts1$v38 <- as.factor(make.names(ts1$v38))
-ts1$v62 <- as.factor(make.names(ts1$v62))
-ts1$v72 <- as.factor(make.names(ts1$v72))
-ts1$v129 <- as.factor(make.names(ts1$v129))
+## These variables have relatively few unique values compared to the other numeric columns
+## Converting these variables to factors ended up helping the model
+ts1$v10 <- as.factor(make.names(ts1$v10)) # 323 unique values
+ts1$v38 <- as.factor(make.names(ts1$v38)) # 11 unique values
+ts1$v62 <- as.factor(make.names(ts1$v62)) # 8 unique values
+ts1$v72 <- as.factor(make.names(ts1$v72)) # 13 unique values
+ts1$v129 <- as.factor(make.names(ts1$v129)) # 10 unique values
 
-# #Box-Cox Transform numerics
-# bc <- function(x) {
-#   bc <- BoxCoxTrans(x+1e-5, na.rm=TRUE)
-#   return(predict(bc, x+1e-5))
-# }
-# 
-# #Notes:
-# # median impute insteaf of -1
-# # dummy vars km7?
-# numCols <- colnames(ts1[,-excludeCols,with=FALSE])[sapply(ts1[,-excludeCols,with=FALSE], is.numeric)]
-# ts1[,(numCols):=lapply(.SD, bc), .SDcols=numCols]
-# 
-# pp <- preProcess(ts1[,numCols,with=F], method=c("medianImpute","center","scale"))
-# ts1 <- predict(pp, ts1)
-
+# Converting NAs to -1. Numerics are greater than 0 so -1 is out of range. 
 ts1[is.na(ts1)] <- -1
-# ts1 <- copy(ts1)
 
 # Get rid of zero variance variables if there are any
 pp <- preProcess(ts1[filter==0, -excludeCols, with=FALSE], method="zv")
 ts1 <- predict(pp, ts1)
 
+#########################################################################################################
+#########################################################################################################
+## INTERACTION COUNTS AND MEAN ENCODING -- http://helios.mm.di.uoa.gr/~rouvas/ssi/sigkdd/sigkdd.vol3.1/barreca.ps
+## The idea is the encode categoricals (usual those with high cardinality) by the mean of their response.
+## However, instead of encoding as their mean, we encode them in a Bayesian manner, using the overall average response
+## as the prior and the mean response of each categorical value as the posterior. A weighted average of the 
+## prior and the posterior is used to encode the categorical variable (or interactions). The weight is based
+## on the frequency of the categorical value (or the frequency of the interaction). I.e. if a category only
+## appears a handful of times then it will be encoded as the overall mean response of the training set, if a category
+## occurs very frequently then most the weight will be placed on the posterior average.
+#########################################################################################################
+#########################################################################################################
 
 #####################
 ## Numeric interactions
 #####################
 pairs <- combn(c("v35","v21","v12","v50","v14","v40","v114","v34"), 2, simplify=FALSE)
-# v35 & v21 turned out ot be the only important interaction
 cl <- makeCluster(threads, type="FORK")
 registerDoParallel(cl)
 set.seed(119)
@@ -560,8 +563,6 @@ colnames(quintMeans) <- unlist(out[[2]])
 ts1 <- cbind(ts1, quintMeans)
 rm(quintMeans); gc()
 
-
-
 ################
 ## Add 7-way averages
 ################
@@ -583,19 +584,23 @@ colnames(septupsMeans) <- unlist(out[[2]])
 ts1 <- cbind(ts1, septupsMeans)
 rm(septupsMeans); gc()
 
-############
-## PAIRWISE CORRELATIONS -- code & idea from Tian Zhou - teammate in Homesite competition
-############
-# Remove features with correlations equal to 1
-numCols <- colnames(ts1[,-excludeCols,with=FALSE])[sapply(ts1[,-excludeCols,with=FALSE], is.numeric)]
-# boruta_results <- Boruta(as.factor(target) ~ ., ts1[filter==0,-c("dummy","pred0","ID","filter"),with=FALSE], holdHistory=FALSE, maxRuns=100) 
-# enableWGCNAThreads(threads)
-system.time(featCor <- cor(ts1[,numCols,with=FALSE]))
-hc <- findCorrelation(featCor, cutoff=0.997 ,names=TRUE)  
-hc <- sort(hc)
-save(featCor, file="./data_trans/featCor_v31.rda")
+#########################################################################################################
+#########################################################################################################
+## PAIRWISE CORRELATIONS (GOLDEN FEATURES) -- code & idea from Tian Zhou - teammate in Homesite competition
+## The idea of this next section is to identify highly correlated variables and then create a new feature
+## for each pair which is the difference between them. This results in new features which basically identify
+## when two columns differ
+#########################################################################################################
+#########################################################################################################
 
+# numCols <- colnames(ts1[,-excludeCols,with=FALSE])[sapply(ts1[,-excludeCols,with=FALSE], is.numeric)]
+# featCor <- cor(ts1[,numCols,with=FALSE]))
+# hc <- findCorrelation(featCor, cutoff=0.997 ,names=TRUE)  # find highly correlated variables
+# hc <- sort(hc)
+# save(featCor, file="./data_trans/featCor_v31.rda")
 
+## Since featCor takes awhile to calculate, we'll import a previously run version to save time
+load("./data_trans/featCor_v31.rda")
 
 featCorDF <- abs(featCor[!rownames(featCor) %in% hc, !colnames(featCor) %in% hc])
 featCorDF[upper.tri(featCorDF, diag=TRUE)] <- NA
@@ -649,9 +654,16 @@ if (length(c(hc,as.character(featCorDF$V2[1:goldFeats])))>0)
 ######################################################
 
 
-############
-## Helper columns
-############
+#########################################################################################################
+#########################################################################################################
+## HELPER COLUMNS
+## The idea is to identify columns for each class that will help differentiate that class from the other classes
+## These columns are then added together to create a new feature that will hopefully improve the model
+## Only numeric columns can be used (can convert categoricals to dummy or mean encodings)
+## Numeric columns need to be centered and scaled before choosing features.
+#########################################################################################################
+#########################################################################################################
+
 # Scale variables so a few don't overpower the helper columns
 pp <- preProcess(ts1[filter==0,-excludeCols,with=FALSE], method=c("zv","center","scale","medianImpute"))
 ts1 <- predict(pp, ts1)
