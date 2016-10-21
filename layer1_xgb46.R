@@ -12,31 +12,32 @@ varnames <- c(names(ts1Trans[filter==0, !colnames(ts1Trans) %in% c("ID","target"
 
 dtrain <- xgb.DMatrix(data=data.matrix(ts1Trans[filter==0, c(varnames),with=FALSE]),label=data.matrix(ts1Trans$target[ts1Trans$filter==0]))
 
-  
+
 param <- list(objective="binary:logistic",
-                eval_metric="logloss",
-                eta = .01,
-                max_depth=7,
-                min_child_weight=1,
-                subsample=.8,
-                colsample_bytree=.4,
-                nthread=6
-  )
-  
+              eval_metric="logloss",
+              eta = .01,
+              max_depth=7,
+              min_child_weight=1,
+              subsample=.8,
+              colsample_bytree=.4,
+              nthread=6
+)
+
 set.seed(201512)
 (tme <- Sys.time())
 xgb46cv <- xgb.cv(data = dtrain,
-                   params = param,
-                   nrounds = 8000,
-                   folds=cvFoldsList,
-                   maximize=FALSE,
-                   prediction=TRUE,
-                   print.every.n = 50,
-                   early.stop.round=200)
+                  params = param,
+                  nrounds = 8000,
+                  folds=cvFoldsList,
+                  maximize=FALSE,
+                  prediction=TRUE,
+                  print.every.n = 50,
+                  early.stop.round=200)
 Sys.time() - tme
 save(xgb46cv, file="./stack_models/xgb46cv.rda")
 # min(xgb46cv$dt$test.logloss.mean)
-# best score -- 0.463343
+# subsampling 10,000 rows from train set -- best logloss = 0.463343
+# entire train set -- best logloss = 0.4308
 
 
 write.csv(data.frame(ID=ts1Trans[filter==0,"ID",with=FALSE], PredictedProb=xgb46cv$pred), "./stack_models/cvPreds/cvPreds_xgb46.csv", row.names=FALSE)
@@ -48,10 +49,10 @@ rounds <- floor(minLossRound * 1.0)
 set.seed(201512)
 (tme <- Sys.time())
 xgb46full <- xgb.train(data = dtrain,
-                      params = param,
-                      nrounds = rounds,
-                      maximize=FALSE,
-                      print.every.n = 20)
+                       params = param,
+                       nrounds = rounds,
+                       maximize=FALSE,
+                       print.every.n = 20)
 Sys.time() - tme
 save(xgb46full, file="./stack_models/xgb46full.rda")
 

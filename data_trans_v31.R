@@ -11,7 +11,7 @@ library(Amelia)
 setwd("/Users/branden/h2oDallas/")
 load("./data_trans/cvFoldsList.rda")
 threads <- detectCores() - 2 # Used for parallelizing mean encoding feature generation
-row_sampling <- 10000 # Feature engineering requires a lot of memory, so subsample for demonstration purposes -- set to <=0 for no sampling
+row_sampling <- 5000 # Feature engineering requires a lot of memory, so subsample for demonstration purposes -- set to <=0 for no sampling
 ##################
 ## FUNCTIONS
 #################
@@ -211,9 +211,9 @@ t1 <- fread("./train.csv")
 s1 <- fread("./test.csv")
 
 if (row_sampling>0){
-  set.seed(100)
+  set.seed(102)
   train_sample <- data.table(sample=sample(t1$ID, size = row_sampling, replace = FALSE))
-  set.seed(101)
+  set.seed(103)
   test_sample <- data.table(sample=sample(s1$ID, size = row_sampling, replace = FALSE))
   t1 <- t1[ID %in% train_sample$sample]
   s1 <- s1[ID %in% test_sample$sample]
@@ -272,7 +272,8 @@ xgbBaselineCV <- xgb.cv(data = dtrain,
 Sys.time() - tme
 save(xgbBaselineCV, file = "./stack_models/xgbBaselineCV.rda")
 min(xgbBaselineCV$dt$test.logloss.mean)
-# best logloss -- 0.47658
+# subsampling 10,000 rows from train set -- best logloss -- 0.479876
+# entire train set -- best logloss -- 0.486111 -- subsample might've scored better because of a good seed
 
 # Create baseline model for important features and XGBFI
 set.seed(201512)
@@ -588,27 +589,27 @@ rm(septupsMeans); gc()
 #########################################################################################################
 ## PAIRWISE CORRELATIONS (GOLDEN FEATURES) -- code & idea from Tian Zhou - teammate in Homesite competition
 ## The idea of this next section is to identify highly correlated variables and then create a new feature
-## for each pair which is the difference between them. This results in new features which basically identify
-## when two columns differ
+## for each pair which is the difference between them. This results in new features which is basically an
+## indiator of when two columns differ.
 #########################################################################################################
 #########################################################################################################
-
-# numCols <- colnames(ts1[,-excludeCols,with=FALSE])[sapply(ts1[,-excludeCols,with=FALSE], is.numeric)]
-# featCor <- cor(ts1[,numCols,with=FALSE]))
+numCols <- colnames(ts1[,-excludeCols,with=FALSE])[sapply(ts1[,-excludeCols,with=FALSE], is.numeric)] # will need this later
+# featCor <- cor(ts1[,numCols,with=FALSE])
 # hc <- findCorrelation(featCor, cutoff=0.997 ,names=TRUE)  # find highly correlated variables
 # hc <- sort(hc)
+# write.csv(hc, "./data_trans/hc.csv", row.names=F)
 # save(featCor, file="./data_trans/featCor_v31.rda")
 
-
-# 
 # featCorDF <- abs(featCor[!rownames(featCor) %in% hc, !colnames(featCor) %in% hc])
 # featCorDF[upper.tri(featCorDF, diag=TRUE)] <- NA
 # featCorDF <- melt(featCorDF, varnames = c('V1','V2'), na.rm=TRUE)
 # featCorDF <- featCorDF[order(featCorDF$value, decreasing=TRUE),]
 # 
+
 # goldFeats <- 300
 # feat_gold <- gold_features(featCorDF, goldFeats)
-# 
+# write.csv(as.character(featCorDF$V2[1:goldFeats]), file = "./data_trans/goldFeatNames.csv",row.names=FALSE)
+
 # # Do not parallelize -- too much memory for some reason
 # cl <- makeCluster(1)
 # registerDoParallel(cl)
@@ -646,15 +647,18 @@ gc()
 # stopCluster(cl)
 # goldAdds <- as.data.frame(out[[1]])
 # colnames(goldAdds) <- unlist(out[[2]])
-write.csv(goldAdds, "./data_trans/goldAdds.csv")
+# write.csv(goldAdds, "./data_trans/goldAdds.csv")
 
-
+## Since featCor takes awhile to calculate, we'll import a previously run version to save time
+goldAdds <- fread("./data_trans/goldAdds.csv")
 ts1 <- cbind(ts1, goldAdds)
 rm(goldAdds)
 gc()
 
-if (length(c(hc,as.character(featCorDF$V2[1:goldFeats])))>0)
-  ts1 <- ts1[,-c(hc,as.character(featCorDF$V2[1:goldFeats])),with=FALSE]
+hc <- fread("./data_trans/hc.csv")
+goldFeatNames <- fread("./data_trans/goldFeatNames.csv")
+if (length(c(hc$x,goldFeatNames$x)>0))
+  ts1 <- ts1[,-c(hc$x,goldFeatNames$x),with=FALSE]
 ######################################################
 
 
@@ -672,8 +676,8 @@ if (length(c(hc,as.character(featCorDF$V2[1:goldFeats])))>0)
 pp <- preProcess(ts1[filter==0,-excludeCols,with=FALSE], method=c("zv","center","scale","medianImpute"))
 ts1 <- predict(pp, ts1)
 
-summ <- as.data.frame(ts1[ts1$filter==0, colnames(ts1) %in% c("target",numCols),with=FALSE] %>% group_by(target) %>%
-                        summarise_each(funs(mean)))
+# summ <- as.data.frame(ts1[ts1$filter==0, colnames(ts1) %in% c("target",numCols),with=FALSE] %>% group_by(target) %>%
+#                         summarise_each(funs(mean)))
 cols <- c("target",numCols)
 summ <- ts1[filter==0, colnames(ts1) %in% cols, with=FALSE][,lapply(.SD, mean) , by=target]
 
