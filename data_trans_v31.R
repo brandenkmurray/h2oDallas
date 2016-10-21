@@ -630,22 +630,24 @@ ts1 <- cbind(ts1, goldMeans)
 rm(goldMeans)
 gc()
 
-goldFeats <- 100
-feat_gold <- gold_featuresUnCor(featCorDF, goldFeats)
+# goldFeats <- 100
+# feat_gold <- gold_featuresUnCor(featCorDF, goldFeats)
+# 
+# # Do not parallelize -- too much memory for some reason
+# cl <- makeCluster(1)
+# registerDoParallel(cl)
+# set.seed(136)
+# out <- foreach(i=1:length(feat_gold), .combine='comb', .multicombine=TRUE,
+#                .init=list(list(), list()), .packages=c("data.table")) %dorng% {
+#                  name <- paste0(feat_gold[[i]][[1]],"_",feat_gold[[i]][[2]],"_corAdd")
+#                  tmp <- ts1[,as.character(feat_gold[[i]][[1]]), with=FALSE] + ts1[,as.character(feat_gold[[i]][[2]]), with=FALSE]
+#                  list(tmp, name)
+#                }
+# stopCluster(cl)
+# goldAdds <- as.data.frame(out[[1]])
+# colnames(goldAdds) <- unlist(out[[2]])
+write.csv(goldAdds, "./data_trans/goldAdds.csv")
 
-# Do not parallelize -- too much memory for some reason
-cl <- makeCluster(1)
-registerDoParallel(cl)
-set.seed(136)
-out <- foreach(i=1:length(feat_gold), .combine='comb', .multicombine=TRUE,
-               .init=list(list(), list()), .packages=c("data.table")) %dorng% {
-                 name <- paste0(feat_gold[[i]][[1]],"_",feat_gold[[i]][[2]],"_corAdd")
-                 tmp <- ts1[,as.character(feat_gold[[i]][[1]]), with=FALSE] + ts1[,as.character(feat_gold[[i]][[2]]), with=FALSE]
-                 list(tmp, name)
-               }
-stopCluster(cl)
-goldAdds <- as.data.frame(out[[1]])
-colnames(goldAdds) <- unlist(out[[2]])
 
 ts1 <- cbind(ts1, goldAdds)
 rm(goldAdds)
