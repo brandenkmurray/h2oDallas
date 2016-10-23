@@ -35,8 +35,8 @@ xgb46cv <- xgb.cv(data = dtrain,
                   early.stop.round=200)
 Sys.time() - tme
 save(xgb46cv, file="./stack_models/xgb46cv.rda")
-# min(xgb46cv$dt$test.logloss.mean)
-# subsampling 10,000 rows from train set -- best logloss = 0.463343
+min(xgb46cv$dt$test.logloss.mean)
+# subsampling 5,000 rows from train set -- best logloss = 0.468511
 # entire train set -- best logloss = 0.4308
 
 

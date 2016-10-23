@@ -10,7 +10,7 @@ library(xgboost)
 library(Amelia)
 setwd("/Users/branden/h2oDallas/")
 load("./data_trans/cvFoldsList.rda")
-threads <- detectCores() - 2 # Used for parallelizing mean encoding feature generation
+threads <- max(detectCores() - 2, 1) # Used for parallelizing mean encoding feature generation
 row_sampling <- 5000 # Feature engineering requires a lot of memory, so subsample for demonstration purposes -- set to <=0 for no sampling
 ##################
 ## FUNCTIONS
@@ -211,15 +211,34 @@ t1 <- fread("./train.csv")
 s1 <- fread("./test.csv")
 
 if (row_sampling>0){
-  set.seed(102)
-  train_sample <- data.table(sample=sample(t1$ID, size = row_sampling, replace = FALSE))
-  set.seed(103)
-  test_sample <- data.table(sample=sample(s1$ID, size = row_sampling, replace = FALSE))
-  t1 <- t1[ID %in% train_sample$sample]
-  s1 <- s1[ID %in% test_sample$sample]
-  cvFoldsList <- createFolds(t1$ID, k=5, list=TRUE) # Need to overwrite when sampling
-  save(cvFoldsList, file="./data_trans/cvFoldsList.rda")
-}
+  if (row_sampling==5000 & file.exists("./data_trans/train_sample.csv") & file.exists("./data_trans/test_sample.csv")){
+      cat("reading samples from file")
+      train_sample <- fread("./data_trans/train_sample.csv")
+      test_sample <- fread("./data_trans/test_sample.csv")
+    } else {
+    cat("no sampling files exist or default row_sampling changed, creating new samples")
+    set.seed(102)
+    train_sample <- data.table(sample=sample(t1$ID, size = row_sampling, replace = FALSE))
+    write.csv(train_sample, "./data_trans/train_sample.csv", row.names=FALSE)
+    set.seed(103)
+    test_sample <- data.table(sample=sample(s1$ID, size = row_sampling, replace = FALSE))
+    write.csv(test_sample, "./data_trans/test_sample.csv", row.names=FALSE)
+  } # end row_sampling==5000 if
+} # end row_sampling > 0 if
+
+t1 <- t1[ID %in% train_sample$sample]
+s1 <- s1[ID %in% test_sample$sample]
+
+# Import cvFoldsList for consistency if row_sampling is the default (5000), else create new folds
+if (row_sampling==5000 & file.exists("./data_trans/cvFoldsList.rda")){
+    cat("loading cvFoldsList from file for consistency")
+    load("./data_trans/cvFoldsList.rda")
+  } else{
+    cat("row_sampling changed from default(5000) or no cvFoldsList file exists, creating new folds")
+    set.seed(2016)
+    cvFoldsList <- createFolds(t1$ID, k=5, list=TRUE) # Need to overwrite when sampling
+    save(cvFoldsList, file="./data_trans/cvFoldsList.rda")
+  }
 
 # Add target to test set for binding
 s1 <- s1[,target:=-1]
@@ -272,7 +291,7 @@ xgbBaselineCV <- xgb.cv(data = dtrain,
 Sys.time() - tme
 save(xgbBaselineCV, file = "./stack_models/xgbBaselineCV.rda")
 min(xgbBaselineCV$dt$test.logloss.mean)
-# subsampling 10,000 rows from train set -- best logloss -- 0.479876
+# subsampling 5,000 rows from train set -- best logloss -- 0.4882
 # entire train set -- best logloss -- 0.486111 -- subsample might've scored better because of a good seed
 
 # Create baseline model for important features and XGBFI
@@ -594,36 +613,36 @@ rm(septupsMeans); gc()
 #########################################################################################################
 #########################################################################################################
 numCols <- colnames(ts1[,-excludeCols,with=FALSE])[sapply(ts1[,-excludeCols,with=FALSE], is.numeric)] # will need this later
-# featCor <- cor(ts1[,numCols,with=FALSE])
-# hc <- findCorrelation(featCor, cutoff=0.997 ,names=TRUE)  # find highly correlated variables
-# hc <- sort(hc)
-# write.csv(hc, "./data_trans/hc.csv", row.names=F)
-# save(featCor, file="./data_trans/featCor_v31.rda")
+featCor <- cor(ts1[,numCols,with=FALSE])
+hc <- findCorrelation(featCor, cutoff=0.997 ,names=TRUE)  # find highly correlated variables
+hc <- sort(hc)
+write.csv(hc, "./data_trans/hc.csv", row.names=F)
+save(featCor, file="./data_trans/featCor_v31.rda")
 
-# featCorDF <- abs(featCor[!rownames(featCor) %in% hc, !colnames(featCor) %in% hc])
-# featCorDF[upper.tri(featCorDF, diag=TRUE)] <- NA
-# featCorDF <- melt(featCorDF, varnames = c('V1','V2'), na.rm=TRUE)
-# featCorDF <- featCorDF[order(featCorDF$value, decreasing=TRUE),]
-# 
+featCorDF <- abs(featCor[!rownames(featCor) %in% hc, !colnames(featCor) %in% hc])
+featCorDF[upper.tri(featCorDF, diag=TRUE)] <- NA
+featCorDF <- melt(featCorDF, varnames = c('V1','V2'), na.rm=TRUE)
+featCorDF <- featCorDF[order(featCorDF$value, decreasing=TRUE),]
 
-# goldFeats <- 300
-# feat_gold <- gold_features(featCorDF, goldFeats)
-# write.csv(as.character(featCorDF$V2[1:goldFeats]), file = "./data_trans/goldFeatNames.csv",row.names=FALSE)
 
-# # Do not parallelize -- too much memory for some reason
-# cl <- makeCluster(1)
-# registerDoParallel(cl)
-# set.seed(136)
-# out <- foreach(i=1:length(feat_gold), .combine='comb', .multicombine=TRUE,
-#                .init=list(list(), list()), .packages=c("data.table")) %dorng% {
-#                  name <- paste0(feat_gold[[i]][[1]],"_",feat_gold[[i]][[2]],"_cor")
-#                  tmp <- ts1[,as.character(feat_gold[[i]][[1]]), with=FALSE] - ts1[,as.character(feat_gold[[i]][[2]]), with=FALSE]
-#                  list(tmp, name)
-#                }
-# stopCluster(cl)
-# goldMeans <- as.data.frame(out[[1]])
-# colnames(goldMeans) <- unlist(out[[2]])
-# write.csv(goldMeans, "./data_trans/goldMeans.csv")
+goldFeats <- 300
+feat_gold <- gold_features(featCorDF, goldFeats)
+write.csv(as.character(featCorDF$V2[1:goldFeats]), file = "./data_trans/goldFeatNames.csv",row.names=FALSE)
+
+# Do not parallelize -- too much memory for some reason
+cl <- makeCluster(1)
+registerDoParallel(cl)
+set.seed(136)
+out <- foreach(i=1:length(feat_gold), .combine='comb', .multicombine=TRUE,
+               .init=list(list(), list()), .packages=c("data.table")) %dorng% {
+                 name <- paste0(feat_gold[[i]][[1]],"_",feat_gold[[i]][[2]],"_cor")
+                 tmp <- ts1[,as.character(feat_gold[[i]][[1]]), with=FALSE] - ts1[,as.character(feat_gold[[i]][[2]]), with=FALSE]
+                 list(tmp, name)
+               }
+stopCluster(cl)
+goldMeans <- as.data.frame(out[[1]])
+colnames(goldMeans) <- unlist(out[[2]])
+write.csv(goldMeans, "./data_trans/goldMeans.csv")
 
 ## Since featCor takes awhile to calculate, we'll import a previously run version to save time
 goldMeans <- fread("./data_trans/goldMeans.csv")
@@ -631,23 +650,23 @@ ts1 <- cbind(ts1, goldMeans)
 rm(goldMeans)
 gc()
 
-# goldFeats <- 100
-# feat_gold <- gold_featuresUnCor(featCorDF, goldFeats)
-# 
-# # Do not parallelize -- too much memory for some reason
-# cl <- makeCluster(1)
-# registerDoParallel(cl)
-# set.seed(136)
-# out <- foreach(i=1:length(feat_gold), .combine='comb', .multicombine=TRUE,
-#                .init=list(list(), list()), .packages=c("data.table")) %dorng% {
-#                  name <- paste0(feat_gold[[i]][[1]],"_",feat_gold[[i]][[2]],"_corAdd")
-#                  tmp <- ts1[,as.character(feat_gold[[i]][[1]]), with=FALSE] + ts1[,as.character(feat_gold[[i]][[2]]), with=FALSE]
-#                  list(tmp, name)
-#                }
-# stopCluster(cl)
-# goldAdds <- as.data.frame(out[[1]])
-# colnames(goldAdds) <- unlist(out[[2]])
-# write.csv(goldAdds, "./data_trans/goldAdds.csv")
+goldFeats <- 100
+feat_gold <- gold_featuresUnCor(featCorDF, goldFeats)
+
+# Do not parallelize -- too much memory for some reason
+cl <- makeCluster(1)
+registerDoParallel(cl)
+set.seed(136)
+out <- foreach(i=1:length(feat_gold), .combine='comb', .multicombine=TRUE,
+               .init=list(list(), list()), .packages=c("data.table")) %dorng% {
+                 name <- paste0(feat_gold[[i]][[1]],"_",feat_gold[[i]][[2]],"_corAdd")
+                 tmp <- ts1[,as.character(feat_gold[[i]][[1]]), with=FALSE] + ts1[,as.character(feat_gold[[i]][[2]]), with=FALSE]
+                 list(tmp, name)
+               }
+stopCluster(cl)
+goldAdds <- as.data.frame(out[[1]])
+colnames(goldAdds) <- unlist(out[[2]])
+write.csv(goldAdds, "./data_trans/goldAdds.csv")
 
 ## Since featCor takes awhile to calculate, we'll import a previously run version to save time
 goldAdds <- fread("./data_trans/goldAdds.csv")
@@ -734,22 +753,24 @@ for(ii in highCardFacts) {
   ts1[,name] <- catNWayAvgCV(data = ts1, c(ii, "dummy"), y = "target",pred0 = "pred0",filter = ts1$filter==0, k = 20, f = 10, r_k = 0.04, cv=cvFoldsList)
 }
 
-
+# Remove high cardinality factors now that we've encoded them
 ts1 <- ts1[,!colnames(ts1) %in% highCardFacts,with=FALSE]
 
 ##################
 ## Create dummy variables for low-dimensional factors
 ##################
-
-dummy <- dummyVars( ~. -1, data = ts1[,-c("dummy","pred0"),with=FALSE])
-ts1 <- data.frame(predict(dummy, ts1))
+factorCols <- colnames(ts1[,-excludeCols,with=FALSE])[sapply(ts1[,-excludeCols,with=FALSE], is.factor)]
+ts1_dum <- as.data.table(model.matrix(~ ., data=ts1[,factorCols,with=FALSE] ))[,-1,with=FALSE]
+# remove factor cols
+ts1 <- ts1[,-factorCols, with=F]
+ts1 <- cbind(ts1, ts1_dum)
 
 
 ###################
 ## Write CSV file
 ###################
-write.csv(as.data.frame(helpCols), "./data_trans/helpCols_v31.csv", row.names=FALSE)
-save(helpCols, file="./data_trans/helpCols_v31.rda")
+# write.csv(as.data.frame(helpCols), "./data_trans/helpCols_v31.csv", row.names=FALSE)
+# save(helpCols, file="./data_trans/helpCols_v31.rda")
 
 ts1 <- ts1[order(ts1$filter, ts1$ID),]
-write.csv(ts1, "./data_trans/ts2Trans_v31.csv")
+write.csv(ts1, "./data_trans/ts2Trans_v31.csv", row.names=FALSE)
