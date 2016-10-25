@@ -11,7 +11,7 @@ library(Amelia)
 setwd("/Users/branden/h2oDallas/")
 load("./data_trans/cvFoldsList.rda")
 threads <- max(detectCores() - 2, 1) # Used for parallelizing mean encoding feature generation
-row_sampling <- 5000 # Feature engineering requires a lot of memory, so subsample for demonstration purposes -- set to <=0 for no sampling
+row_sampling <- 0 # Feature engineering requires a lot of memory, so subsample for demonstration purposes -- set to <=0 for no sampling
 ##################
 ## FUNCTIONS
 #################
@@ -224,10 +224,12 @@ if (row_sampling>0){
     test_sample <- data.table(sample=sample(s1$ID, size = row_sampling, replace = FALSE))
     write.csv(test_sample, "./data_trans/test_sample.csv", row.names=FALSE)
   } # end row_sampling==5000 if
+  
+  t1 <- t1[ID %in% train_sample$sample]
+  s1 <- s1[ID %in% test_sample$sample]
 } # end row_sampling > 0 if
 
-t1 <- t1[ID %in% train_sample$sample]
-s1 <- s1[ID %in% test_sample$sample]
+
 
 # Import cvFoldsList for consistency if row_sampling is the default (5000), else create new folds
 if (row_sampling==5000 & file.exists("./data_trans/cvFoldsList.rda")){
@@ -337,6 +339,7 @@ ts1 <- cbind(pred0=mean(t1$target), dummy="A", filter=c(rep(0, nrow(t1)), rep(2,
 
 # v91 and v107 are the same -- just different labels -- so remove v107
 ts1[,v107:=NULL]
+
 # v10 -- round v10 -- convert to categorical later
 hist(ts1$v10, breaks = 1000) # Frequency spikes at pretty even intervals, so can round the values to the nearest spike and turn into a categorical
 ts1[,v10:=round(v10/0.0218818357511,0)]
@@ -424,7 +427,7 @@ ts1 <- predict(pp, ts1)
 #########################################################################################################
 #########################################################################################################
 ## INTERACTION COUNTS AND MEAN ENCODING -- http://helios.mm.di.uoa.gr/~rouvas/ssi/sigkdd/sigkdd.vol3.1/barreca.ps
-## The idea is the encode categoricals (usual those with high cardinality) by the mean of their response.
+## The idea is the encode categoricals (usually those with high cardinality) by the mean of their response.
 ## However, instead of encoding as their mean, we encode them in a Bayesian manner, using the overall average response
 ## as the prior and the mean response of each categorical value as the posterior. A weighted average of the 
 ## prior and the posterior is used to encode the categorical variable (or interactions). The weight is based
@@ -438,7 +441,7 @@ ts1 <- predict(pp, ts1)
 ## Numeric interactions
 #####################
 pairs <- combn(c("v35","v21","v12","v50","v14","v40","v114","v34"), 2, simplify=FALSE)
-cl <- makeCluster(threads, type="FORK")
+cl <- makeCluster(threads)
 registerDoParallel(cl)
 set.seed(119)
 out <- foreach(i=1:length(pairs), .combine='comb', .multicombine=TRUE,
