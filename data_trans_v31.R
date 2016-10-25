@@ -338,6 +338,7 @@ ts1 <- cbind(pred0=mean(t1$target), dummy="A", filter=c(rep(0, nrow(t1)), rep(2,
 # v91 and v107 are the same -- just different labels -- so remove v107
 ts1[,v107:=NULL]
 # v10 -- round v10 -- convert to categorical later
+hist(ts1$v10, breaks = 1000) # Frequency spikes at pretty even intervals, so can round the values to the nearest spike and turn into a categorical
 ts1[,v10:=round(v10/0.0218818357511,0)]
 
 
