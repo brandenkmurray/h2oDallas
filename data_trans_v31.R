@@ -11,7 +11,7 @@ library(Amelia)
 setwd("/Users/branden/h2oDallas/")
 load("./data_trans/cvFoldsList.rda")
 threads <- max(detectCores() - 2, 1) # Used for parallelizing mean encoding feature generation
-row_sampling <- 0 # Feature engineering requires a lot of memory, so subsample for demonstration purposes -- set to <=0 for no sampling
+row_sampling <- 5000 # Feature engineering requires a lot of memory, so subsample for demonstration purposes -- set to <=0 for no sampling
 ##################
 ## FUNCTIONS
 #################
@@ -293,15 +293,15 @@ xgbBaselineCV <- xgb.cv(data = dtrain,
 Sys.time() - tme
 save(xgbBaselineCV, file = "./stack_models/xgbBaselineCV.rda")
 min(xgbBaselineCV$dt$test.logloss.mean)
-# subsampling 5,000 rows from train set -- best logloss -- 0.4882
-# entire train set -- best logloss -- 0.486111 -- subsample might've scored better because of a good seed
+# subsampling 5,000 rows from train set -- best logloss -- 0.4892
+# entire train set -- best logloss -- 0.4629 -- subsample might've scored better because of a good seed
 
 # Create baseline model for important features and XGBFI
 set.seed(201512)
 (tme <- Sys.time())
 xgbBaseline <- xgb.train(data = dtrain,
                          params = param,
-                         nrounds = 538) # nrounds from xgbBaseline
+                         nrounds = which.min(xgbBaselineCV$dt$test.logloss.mean)) # nrounds from xgbBaseline
 Sys.time() - tme
 xgbImp <- xgb.importance(feature_names = varnames, model = xgbBaseline)
 View(xgbImp)
