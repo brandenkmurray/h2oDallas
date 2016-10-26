@@ -294,7 +294,7 @@ Sys.time() - tme
 save(xgbBaselineCV, file = "./stack_models/xgbBaselineCV.rda")
 min(xgbBaselineCV$dt$test.logloss.mean)
 # subsampling 5,000 rows from train set -- best logloss -- 0.4892
-# entire train set -- best logloss -- 0.4629 -- subsample might've scored better because of a good seed
+# entire train set -- best logloss -- 0.4629
 
 # Create baseline model for important features and XGBFI
 set.seed(201512)
@@ -327,7 +327,7 @@ if(!file.exists("./data_trans/xgbBaseline_fmap.txt")){ #Create fmap if it doesn'
 
 xgb.dump(model=xgbBaseline, fname="./data_trans/xgbBaseline_dump", fmap="./data_trans/xgbBaseline_fmap.txt", with.stats = TRUE)
 # After this you will need to run Xgbfi from the command line (see the GitHub Readme)
-# To save time the output is included in 
+# To save time the output is included in the repo 
 
 #########################################################################################################
 #########################################################################################################
